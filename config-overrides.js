@@ -18,6 +18,11 @@ module.exports = function override(webpackConfig) {
   webpackConfig.plugins.push(
     new webpack.ProvidePlugin({ Buffer: ["buffer", "Buffer"] })
   );
+  
+  webpackConfig.plugins.push(
+    new webpack.ProvidePlugin({ process: ['process/browser'] })
+  );
+  
 
   // Polyfill other modules.
   webpackConfig.resolve.fallback = {
@@ -26,7 +31,6 @@ module.exports = function override(webpackConfig) {
     util: require.resolve("util"),
     assert: require.resolve("assert"),
     fs: false,
-    process: false,
     path: false,
     zlib: false,
   };

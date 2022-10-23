@@ -1,16 +1,18 @@
 import { FieldValues, useForm } from "react-hook-form";
 
 // import secret from "./guideSecret.json";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useMetaplex } from "./useMetaplex";
-import { UploadMetadataInput } from "@metaplex-foundation/js";
+import { bundlrStorage, UploadMetadataInput } from "@metaplex-foundation/js";
 import { yupResolver } from "@hookform/resolvers/yup";
 import * as yup from "yup";
 import { MyTextInput } from "./components/MyTextInput";
+import { useWallet } from "@solana/wallet-adapter-react";
 
 type TokenAttributes = UploadMetadataInput & {
   numDecimals: Number;
-  numberTokens: Number;
+  numTokens: Number;
+  metadataUrl: string | null
 };
 
 const schema = yup
@@ -26,6 +28,8 @@ const schema = yup
 
 export default function NewFungibleTokenForm() {
   const metaplexProvider = useMetaplex();
+  const wallet = useWallet();
+  const [tokenAttributes, setTokenAttributes] = useState<TokenAttributes>();
   const {
     register,
     handleSubmit,
@@ -33,11 +37,41 @@ export default function NewFungibleTokenForm() {
   } = useForm({
     resolver: yupResolver(schema),
   });
-  const onSubmit = async (data: FieldValues) => {
+
+  const uploadMetadata = async (
+    tokenMetadata: UploadMetadataInput
+  ): Promise<string> => {
     const metaplex = metaplexProvider.metaplex;
     if (metaplex) {
+      metaplex.use(bundlrStorage());
+      const { uri } = await metaplex.nfts().uploadMetadata(tokenMetadata);
+      console.log(`Arweave URL: `, uri);
+      return uri;
     } else {
-      alert("metaplex not initialized");
+      throw new Error("metaplex not initialized");
+      
+    }
+  };
+
+  const onSubmit = async (data: FieldValues) => {
+    const metaplex = metaplexProvider.metaplex;
+    const ta : TokenAttributes = {
+      name: data.name as string,
+      numDecimals: data.numDecimals as Number || 0,
+      numTokens: data.numTokenInitial as Number || 0,
+      metadataUrl: ""
+    }
+    setTokenAttributes(ta)
+    if (metaplex) {
+      const url = await uploadMetadata({
+        name: data.name,
+        symbol: data.symbol,
+        description: data.description,
+        image: data.image
+      })
+      setTokenAttributes({...ta, metadataUrl: url})
+    } else {
+      throw new Error("metaplex not initialized");
     }
   };
 
@@ -90,6 +124,9 @@ export default function NewFungibleTokenForm() {
           value="create"
           className="focus:outline-none text-white bg-purple-700 hover:bg-purple-800 focus:ring-4 focus:ring-purple-300 font-medium rounded-lg text-sm px-5 py-2.5 mb-2 dark:bg-purple-600 dark:hover:bg-purple-700 dark:focus:ring-purple-900"
         />
+        <div>
+          {JSON.stringify(tokenAttributes)}
+        </div>
       </form>
     </div>
   );
