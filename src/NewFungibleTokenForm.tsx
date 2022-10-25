@@ -3,16 +3,31 @@ import { FieldValues, useForm } from "react-hook-form";
 // import secret from "./guideSecret.json";
 import { useEffect, useState } from "react";
 import { useMetaplex } from "./useMetaplex";
-import { bundlrStorage, UploadMetadataInput } from "@metaplex-foundation/js";
+import {
+  bundlrStorage,
+  findMetadataPda,
+  UploadMetadataInput,
+} from "@metaplex-foundation/js";
 import { yupResolver } from "@hookform/resolvers/yup";
 import * as yup from "yup";
 import { MyTextInput } from "./components/MyTextInput";
-import { useWallet } from "@solana/wallet-adapter-react";
+import { useConnection, useWallet } from "@solana/wallet-adapter-react";
+import {
+  createAssociatedTokenAccountInstruction,
+  createInitializeMintInstruction,
+  createMintToInstruction,
+  getAssociatedTokenAddress,
+  getMinimumBalanceForRentExemptMint,
+  MINT_SIZE,
+  TOKEN_PROGRAM_ID,
+} from "@solana/spl-token";
+import { Keypair, SystemProgram, Transaction } from "@solana/web3.js";
+import { createCreateMetadataAccountV2Instruction } from "@metaplex-foundation/mpl-token-metadata";
 
 type TokenAttributes = UploadMetadataInput & {
-  numDecimals: Number;
-  numTokens: Number;
-  metadataUrl: string | null
+  numDecimals: number;
+  numTokens: number;
+  metadataUrl: string | null;
 };
 
 const schema = yup
@@ -22,13 +37,14 @@ const schema = yup
     symbol: yup.string().required(),
     description: yup.string().optional(),
     image: yup.string().optional(),
-    numTokenInitial: yup.number().min(0).required(),
+    numTokens: yup.number().min(0).required(),
   })
   .required();
 
 export default function NewFungibleTokenForm() {
   const metaplexProvider = useMetaplex();
   const wallet = useWallet();
+  const connection = useConnection();
   const [tokenAttributes, setTokenAttributes] = useState<TokenAttributes>();
   const {
     register,
@@ -41,7 +57,7 @@ export default function NewFungibleTokenForm() {
   const uploadMetadata = async (
     tokenMetadata: UploadMetadataInput
   ): Promise<string> => {
-    const metaplex = metaplexProvider.metaplex;
+    const { metaplex } = metaplexProvider;
     if (metaplex) {
       metaplex.use(bundlrStorage());
       const { uri } = await metaplex.nfts().uploadMetadata(tokenMetadata);
@@ -49,27 +65,96 @@ export default function NewFungibleTokenForm() {
       return uri;
     } else {
       throw new Error("metaplex not initialized");
-      
     }
   };
 
   const onSubmit = async (data: FieldValues) => {
-    const metaplex = metaplexProvider.metaplex;
-    const ta : TokenAttributes = {
-      name: data.name as string,
-      numDecimals: data.numDecimals as Number || 0,
-      numTokens: data.numTokenInitial as Number || 0,
-      metadataUrl: ""
-    }
-    setTokenAttributes(ta)
+    const { metaplex } = metaplexProvider;
+    const ta = data as TokenAttributes;
+    setTokenAttributes(ta);
     if (metaplex) {
-      const url = await uploadMetadata({
-        name: data.name,
-        symbol: data.symbol,
-        description: data.description,
-        image: data.image
-      })
-      setTokenAttributes({...ta, metadataUrl: url})
+      const uri = await uploadMetadata({
+        name: ta.name,
+        symbol: ta.symbol,
+        description: ta.description,
+        image: ta.image,
+      });
+      setTokenAttributes({ ...ta, metadataUrl: uri });
+      let mintKeypair = Keypair.generate();
+      const requiredBalance = await getMinimumBalanceForRentExemptMint(
+        metaplex.connection
+      );
+      const metadataPDA = await findMetadataPda(mintKeypair.publicKey);
+      const tokenATA = await getAssociatedTokenAddress(
+        mintKeypair.publicKey,
+        wallet.publicKey!
+      );
+      const mintAuthority = wallet.publicKey!;
+      const freezeAuthority = wallet.publicKey!;
+      const createNewTokenTransaction = new Transaction().add(
+        SystemProgram.createAccount({
+          fromPubkey: wallet.publicKey!,
+          newAccountPubkey: mintKeypair.publicKey,
+          space: MINT_SIZE,
+          lamports: requiredBalance,
+          programId: TOKEN_PROGRAM_ID,
+        }),
+        createInitializeMintInstruction(
+          mintKeypair.publicKey, //Mint Address
+          ta.numDecimals, //Number of Decimals of New mint
+          mintAuthority, //Mint Authority
+          freezeAuthority, //Freeze Authority
+          TOKEN_PROGRAM_ID
+        ),
+        createAssociatedTokenAccountInstruction(
+          wallet.publicKey!, //Payer
+          tokenATA, //Associated token account
+          wallet.publicKey!, //token owner
+          mintKeypair.publicKey //Mint
+        ),
+        createMintToInstruction(
+          mintKeypair.publicKey, //Mint
+          tokenATA, //Destination Token Account
+          mintAuthority, //Authority
+          ta.numTokens * Math.pow(10, ta.numDecimals) //number of tokens
+        ),
+        createCreateMetadataAccountV2Instruction(
+          {
+            metadata: metadataPDA,
+            mint: mintKeypair.publicKey,
+            mintAuthority: mintAuthority,
+            payer: wallet.publicKey!,
+            updateAuthority: mintAuthority,
+          },
+          {
+            createMetadataAccountArgsV2: {
+              data: {
+                name: ta.name!,
+                symbol: ta.symbol!,
+                uri: uri,
+                sellerFeeBasisPoints: 0,
+                creators: null,
+                collection: null,
+                uses: null,
+              },
+              isMutable: true,
+            },
+          }
+        )
+      );
+      let blockhash = (
+        await connection.connection.getLatestBlockhash("finalized")
+      ).blockhash;
+      createNewTokenTransaction.recentBlockhash = blockhash;
+      createNewTokenTransaction.feePayer = wallet.publicKey!;
+      createNewTokenTransaction.partialSign(mintKeypair);
+      // await wallet.signTransaction?.(createNewTokenTransaction);
+      const transactionId = await wallet.sendTransaction(
+        createNewTokenTransaction,
+        connection.connection
+      );
+      // const transactionId = await connection.connection.sendTransaction(createNewTokenTransaction,[mintKeypair])
+      console.log({ mintPubKey: mintKeypair.publicKey, transactionId });
     } else {
       throw new Error("metaplex not initialized");
     }
@@ -86,28 +171,19 @@ export default function NewFungibleTokenForm() {
     <div className="text-gray-500 bg-orange-100 border-8 rounded-3xl p-20 max-w-4xl	">
       <h1 className="font-extrabold text-3xl">Fill your token attributes</h1>
       <form onSubmit={handleSubmit(onSubmit)}>
+        <MyTextInput register={{ ...register("name") }} caption="name" />
         <MyTextInput
-          register={{ ...register("name", { required: true }) }}
-          caption="name"
-        />
-        <MyTextInput
-          register={{ ...register("numDecimals", { required: true }) }}
+          register={{ ...register("numDecimals") }}
           caption="Num Decimals"
         />
+        <MyTextInput register={{ ...register("symbol") }} caption="Symbol" />
         <MyTextInput
-          register={{ ...register("symbol", { required: true }) }}
-          caption="Symbol"
-        />
-        <MyTextInput
-          register={{ ...register("description", { required: true }) }}
+          register={{ ...register("description") }}
           caption="Description"
         />
+        <MyTextInput register={{ ...register("image") }} caption="Image Url" />
         <MyTextInput
-          register={{ ...register("image", { required: true }) }}
-          caption="Image Url"
-        />
-        <MyTextInput
-          register={{ ...register("numTokenInitial", { required: true }) }}
+          register={{ ...register("numTokens") }}
           caption="Num tokens to mint initially"
         />
         {Object.keys(errors).map((k) => (
@@ -124,9 +200,7 @@ export default function NewFungibleTokenForm() {
           value="create"
           className="focus:outline-none text-white bg-purple-700 hover:bg-purple-800 focus:ring-4 focus:ring-purple-300 font-medium rounded-lg text-sm px-5 py-2.5 mb-2 dark:bg-purple-600 dark:hover:bg-purple-700 dark:focus:ring-purple-900"
         />
-        <div>
-          {JSON.stringify(tokenAttributes)}
-        </div>
+        <div>{JSON.stringify(tokenAttributes)}</div>
       </form>
     </div>
   );
